@@ -52,6 +52,7 @@ from rclpy.time import Time
 from .config import (
     FOLLOW_DISTANCE,
     OBJECT_LOST_TIMEOUT,
+    APPROACH_LOST_TIMEOUT,  # NEW: Longer timeout for APPROACHING state
     ROTATE_TIMEOUT,
     SEARCH_FORWARD_TIME,
     SEARCH_FORWARD_SPEED,
@@ -164,6 +165,10 @@ class ObjectFollowerModular(Node):
         
         # Exploration lock (prevents detection from interfering with waypoint nav)
         self._exploration_locked = False
+        
+        # APPROACHING state - remember last target goal to continue even if temporarily lost
+        self._last_target_goal: Optional[tuple] = None  # (x, y, yaw)
+        self._approach_goal_reached = False  # True when Nav2 succeeds in APPROACHING
         
         # TF
         self._tf_buffer = tf2_ros.Buffer()
@@ -409,10 +414,14 @@ class ObjectFollowerModular(Node):
                 self._send_nav_goal_to_object()
                 return
                 
-            # Update approach goal periodically
+            # Update approach goal if in APPROACHING and goal isn't active
+            # (don't constantly update if already navigating - let it finish)
             if self._state == FollowerState.APPROACHING:
-                # Rate limited by Nav2Handler
-                self._send_nav_goal_to_object()
+                # Only update goal if no active goal, or if we've been detecting for a while
+                # This prevents "chasing" behavior where robot keeps updating goal
+                if not self._nav2.is_goal_active:
+                    self._send_nav_goal_to_object()
+                # else: goal is active, let it complete
                 return
                 
     def _image_callback(self, msg: Image):
@@ -439,24 +448,37 @@ class ObjectFollowerModular(Node):
             self._exploration_locked = False
             self._stop_motion()
             self._scanner.start()
+        elif self._state == FollowerState.APPROACHING:
+            # Reached the approach goal - mark it so timer_callback can handle
+            self.get_logger().info("Approach goal reached!")
+            self._approach_goal_reached = True
+            # Don't switch states here - let timer_callback handle based on detection
             
     def _on_nav_aborted(self, distance: float):
         """Called when Nav2 goal aborted."""
-        # Check if we're close enough to treat as reached
-        if self._amcl_pose and self._waypoints.current_waypoint:
-            wp = self._waypoints.current_waypoint
-            dx = wp.x - self._amcl_pose.pose.pose.position.x
-            dy = wp.y - self._amcl_pose.pose.pose.position.y
-            d = math.hypot(dx, dy)
+        # Handle differently based on current state
+        if self._state == FollowerState.APPROACHING:
+            # In APPROACHING, don't give up - we'll retry or search
+            self.get_logger().warn(f"Approach goal aborted - will continue trying")
+            # Let timer_callback handle the retry logic
+            return
             
-            if d < NEAR_GOAL_EPS:
-                self.get_logger().info(f"Near waypoint (d={d:.3f}m), treating as reached")
-                self._on_waypoint_reached()
-                return
-            else:
-                self.get_logger().warn(f"Far from goal (d={d:.2f}m), skipping waypoint")
-                self._waypoints.mark_waypoint_failed()
-                self._exploration_locked = False
+        # For EXPLORING state, check if we're close enough to treat as reached
+        if self._state == FollowerState.EXPLORING:
+            if self._amcl_pose and self._waypoints.current_waypoint:
+                wp = self._waypoints.current_waypoint
+                dx = wp.x - self._amcl_pose.pose.pose.position.x
+                dy = wp.y - self._amcl_pose.pose.pose.position.y
+                d = math.hypot(dx, dy)
+                
+                if d < NEAR_GOAL_EPS:
+                    self.get_logger().info(f"Near waypoint (d={d:.3f}m), treating as reached")
+                    self._on_waypoint_reached()
+                    return
+                else:
+                    self.get_logger().warn(f"Far from goal (d={d:.2f}m), skipping waypoint")
+                    self._waypoints.mark_waypoint_failed()
+                    self._exploration_locked = False
                 
     def _on_nav_canceled(self):
         """Called when Nav2 goal canceled."""
@@ -555,12 +577,51 @@ class ObjectFollowerModular(Node):
                     
         # ==================== APPROACHING State ====================
         if self._state == FollowerState.APPROACHING:
-            # Check for lost object
-            if (self._last_detection_time and 
-                (now - self._last_detection_time) > 3.0):
-                self.get_logger().info("Object lost during APPROACHING -> SEARCHING")
+            # Check if we've reached the approach goal
+            if self._approach_goal_reached:
+                self._approach_goal_reached = False
+                
+                # If we can still see the target, switch to TRACKING
+                if (self._last_detection_time and 
+                    (now - self._last_detection_time) < OBJECT_LOST_TIMEOUT):
+                    self.get_logger().info("Approach goal reached with target visible -> TRACKING")
+                    self._state = FollowerState.TRACKING
+                    self._tracking_mode = True
+                    # Init tracker if we have detection
+                    if self._detector.current_detection and self._camera_image is not None:
+                        det = self._detector.current_detection
+                        cam_h, cam_w = self._camera_image.shape[:2]
+                        left, top, right, bottom = self._detector.scale_to_camera(
+                            det, cam_w, cam_h
+                        )
+                        self._init_tracker_from_detection(left, top, right, bottom)
+                else:
+                    # Goal reached but target not visible - search at this location
+                    self.get_logger().info("Approach goal reached but target lost -> SEARCHING")
+                    self._start_searching()
+                return
+            
+            # Check if object is still visible
+            time_since_detection = (now - self._last_detection_time) if self._last_detection_time else float('inf')
+            
+            if time_since_detection < OBJECT_LOST_TIMEOUT:
+                # Object still visible - continue approaching (goal updates handled in detection_callback)
+                return
+            elif time_since_detection < APPROACH_LOST_TIMEOUT:
+                # Object temporarily lost but within timeout - CONTINUE TO GOAL!
+                # This is key: don't give up just because we lost sight temporarily
+                if not self._nav2.is_goal_active and self._last_target_goal:
+                    # Re-send goal to last known target position
+                    x, y, yaw = self._last_target_goal
+                    self.get_logger().info(f"Object temporarily lost, continuing to last known position ({x:.2f},{y:.2f})")
+                    self._nav2.send_goal(x, y, yaw)
+                return
+            else:
+                # Object lost for too long - give up and search
+                self.get_logger().info(f"Object lost for {time_since_detection:.1f}s during APPROACHING -> SEARCHING")
                 self._state = FollowerState.SEARCHING
                 self._nav2.cancel_current_goal()
+                self._last_target_goal = None
                 self._start_searching()
             return
             
@@ -730,7 +791,7 @@ class ObjectFollowerModular(Node):
         # Get camera transform
         tf_msg = self._get_camera_transform()
         if not tf_msg:
-            return
+            return False
             
         tx = tf_msg.transform.translation.x
         ty = tf_msg.transform.translation.y
@@ -741,7 +802,11 @@ class ObjectFollowerModular(Node):
         goal_x = float(tx + FOLLOW_DISTANCE * math.cos(yaw))
         goal_y = float(ty + FOLLOW_DISTANCE * math.sin(yaw))
         
-        self._nav2.send_goal(goal_x, goal_y, yaw)
+        # Save the goal so we can continue even if temporarily lost
+        self._last_target_goal = (goal_x, goal_y, yaw)
+        self._approach_goal_reached = False
+        
+        return self._nav2.send_goal(goal_x, goal_y, yaw)
         
     def _get_camera_transform(self):
         """Get camera to map transform."""
@@ -769,6 +834,10 @@ class ObjectFollowerModular(Node):
         """Enter SEARCHING state."""
         self._nav2.cancel_current_goal()
         self._exploration_locked = False
+        
+        # Reset approach state
+        self._last_target_goal = None
+        self._approach_goal_reached = False
         
         self._state = FollowerState.SEARCHING
         self._search_start_time = self._time.now()

@@ -18,7 +18,8 @@ NAV_RESULT_COOLDOWN = 0.8        # Seconds after nav2 result before sending agai
 # =============================================================================
 # TIMEOUT SETTINGS
 # =============================================================================
-OBJECT_LOST_TIMEOUT = 2.0        # Seconds before declaring object lost
+OBJECT_LOST_TIMEOUT = 2.0        # Seconds before declaring object lost (TRACKING)
+APPROACH_LOST_TIMEOUT = 8.0      # Seconds before declaring lost during APPROACHING (longer!)
 ROTATE_TIMEOUT = 6.0             # Seconds to rotate in SEARCHING phase
 SEARCH_FORWARD_TIME = 1.0        # Seconds to drive forward in SEARCHING
 SEARCH_MAX_DURATION = 18.0       # Max seconds in SEARCHING before returning to EXPLORING
