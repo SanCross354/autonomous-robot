@@ -4,7 +4,7 @@ package_name = 'object_follower'
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.2.0',
     packages=[package_name],
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -17,17 +17,20 @@ setup(
     zip_safe=True,
     maintainer='sancross354',
     maintainer_email='your_email@example.com',
-    description='Object following ROS2 node',
+    description='Object following ROS2 node with modular architecture',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            # Original nodes (kept for backward compatibility)
             'object_follower_node = object_follower.object_follower_node:main',
             'object_follower_node_reconstructed = object_follower.object_follower_node_reconstructed:main',
             'object_follower_experiment = object_follower.object_follower_experiment:main',
             'object_tracker_csrt = object_follower.object_tracker_csrt:main',
             'object_selector_gui = object_follower.object_selector_gui:launch_gui',
             'object_selector_node_pyqt5 = object_follower.object_selector_node_pyqt5:launch_gui',
+            # NEW: Modular version with all fixes
+            'object_follower_modular = object_follower.object_follower_modular:main',
         ],
     },
 )
