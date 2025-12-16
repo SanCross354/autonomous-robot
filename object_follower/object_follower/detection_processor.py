@@ -177,16 +177,38 @@ class DetectionProcessor:
         else:
             sx = sy = 1.0
             
-        left = int(max(0, round(detection.left * sx)))
-        top = int(max(0, round(detection.top * sy)))
-        right = int(min(camera_width, round(detection.right * sx)))
-        bottom = int(min(camera_height, round(detection.bottom * sy)))
+        # Scale coordinates
+        left = int(round(detection.left * sx))
+        top = int(round(detection.top * sy))
+        right = int(round(detection.right * sx))
+        bottom = int(round(detection.bottom * sy))
         
-        # Ensure valid
-        if right <= left:
-            right = min(camera_width, left + 1)
-        if bottom <= top:
-            bottom = min(camera_height, top + 1)
+        # Clamp to image bounds
+        left = max(0, min(left, camera_width - 1))
+        top = max(0, min(top, camera_height - 1))
+        right = max(left + 1, min(right, camera_width))
+        bottom = max(top + 1, min(bottom, camera_height))
+        
+        # Ensure minimum dimensions (20 pixels for tracker)
+        MIN_DIM = 20
+        
+        # Width expansion: prefer expanding rightward, then leftward
+        if (right - left) < MIN_DIM:
+            needed = MIN_DIM - (right - left)
+            expand_right = min(needed, camera_width - right)
+            right += expand_right
+            expand_left = min(needed - expand_right, left)
+            left -= expand_left
+            
+        # Height expansion: prefer expanding UPWARD (for objects at bottom)
+        if (bottom - top) < MIN_DIM:
+            needed = MIN_DIM - (bottom - top)
+            # First try expanding upward
+            expand_up = min(needed, top)
+            top -= expand_up
+            # Then expand downward if needed
+            expand_down = min(needed - expand_up, camera_height - bottom)
+            bottom += expand_down
             
         return (left, top, right, bottom)
         

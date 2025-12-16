@@ -11,6 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         # Include launch folder too
+        # Include launch folder too
         ('share/' + package_name + '/launch', ['launch/object_follower_launch.py']),
     ],
     install_requires=['setuptools'],

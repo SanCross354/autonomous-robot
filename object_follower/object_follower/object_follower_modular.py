@@ -68,6 +68,7 @@ from .config import (
     DETECTION_STOP_THRESHOLD,
     NEAR_GOAL_EPS,
     NAV_RESULT_COOLDOWN,
+    APPROACH_LOST_TIMEOUT,
 )
 from .states import FollowerState
 from .time_utils import TimeManager, get_ros_time_sec
@@ -144,6 +145,10 @@ class ObjectFollowerModular(Node):
         
         # Detection timing
         self._last_detection_time: Optional[float] = None
+        
+        # Motion Memory
+        self._last_target_goal: Optional[tuple] = None  # (x, y, yaw)
+        self._approach_goal_reached = False
         
         # Searching state
         self._last_rotate_time: Optional[float] = None
@@ -411,8 +416,9 @@ class ObjectFollowerModular(Node):
                 
             # Update approach goal periodically
             if self._state == FollowerState.APPROACHING:
-                # Rate limited by Nav2Handler
-                self._send_nav_goal_to_object()
+                # Rate limited by Nav2Handler AND by active goal check
+                if not self._nav2.is_goal_active:
+                     self._send_nav_goal_to_object()
                 return
                 
     def _image_callback(self, msg: Image):
@@ -439,9 +445,18 @@ class ObjectFollowerModular(Node):
             self._exploration_locked = False
             self._stop_motion()
             self._scanner.start()
+        elif self._state == FollowerState.APPROACHING:
+            val = "visible" if (self._last_detection_time and (self._time.now() - self._last_detection_time) < 2.0) else "NOT visible"
+            self.get_logger().info(f"Approach goal reached! Target is {val}")
+            self._approach_goal_reached = True
+            # Timer callback will decide next move
             
     def _on_nav_aborted(self, distance: float):
         """Called when Nav2 goal aborted."""
+        # [FIX]: If we are APPROACHING or TRACKING, ignore waypoint aborts
+        if self._state in [FollowerState.APPROACHING, FollowerState.TRACKING]:
+            return
+            
         # Check if we're close enough to treat as reached
         if self._amcl_pose and self._waypoints.current_waypoint:
             wp = self._waypoints.current_waypoint
@@ -510,8 +525,21 @@ class ObjectFollowerModular(Node):
             # Check if detected during search
             if (self._last_detection_time and 
                 (now - self._last_detection_time) < OBJECT_LOST_TIMEOUT):
+                # FIX: Must initialize tracker when switching to TRACKING!
                 self._state = FollowerState.TRACKING
-                self._publish_status("Switch to TRACKING (detected during search)")
+                self._tracking_mode = True
+                
+                # Initialize tracker from current detection
+                if self._detector.current_detection and self._camera_image is not None:
+                    det = self._detector.current_detection
+                    cam_h, cam_w = self._camera_image.shape[:2]
+                    left, top, right, bottom = self._detector.scale_to_camera(
+                        det, cam_w, cam_h
+                    )
+                    self._init_tracker_from_detection(left, top, right, bottom)
+                    self._publish_status("Switch to TRACKING (detected during search)")
+                else:
+                    self.get_logger().warn("Switching to TRACKING but no detection available")
                 return
                 
             if not self._search_start_time:
@@ -555,10 +583,31 @@ class ObjectFollowerModular(Node):
                     
         # ==================== APPROACHING State ====================
         if self._state == FollowerState.APPROACHING:
-            # Check for lost object
-            if (self._last_detection_time and 
-                (now - self._last_detection_time) > 3.0):
-                self.get_logger().info("Object lost during APPROACHING -> SEARCHING")
+            time_since_detection = 1000.0
+            if self._last_detection_time:
+                time_since_detection = now - self._last_detection_time
+
+            # Phase 1: Object Visible (or very recently lost)
+            if time_since_detection < OBJECT_LOST_TIMEOUT:
+                # Keep approaching (Nav2 is handling it)
+                pass
+
+            # Phase 2: Temporarily Lost -> Motion Memory
+            elif time_since_detection < APPROACH_LOST_TIMEOUT:
+                if self._approach_goal_reached:
+                     # We reached the last known location but still don't see it -> SEARCH
+                    self.get_logger().info("Reached approach goal but target not seen -> SEARCHING")
+                    self._state = FollowerState.SEARCHING
+                    self._start_searching()
+                elif not self._nav2.is_goal_active and self._last_target_goal:
+                     # Lost, but we have a target -> Continue to it
+                     self.get_logger().info(f"Object temp. lost ({time_since_detection:.1f}s), continuing to last goal")
+                     gx, gy, gyaw = self._last_target_goal
+                     self._nav2.send_goal(gx, gy, gyaw)
+
+            # Phase 3: Lost for too long -> Give up
+            else:
+                self.get_logger().info(f"Object lost for {time_since_detection:.1f}s -> SEARCHING")
                 self._state = FollowerState.SEARCHING
                 self._nav2.cancel_current_goal()
                 self._start_searching()
@@ -681,17 +730,48 @@ class ObjectFollowerModular(Node):
                 cam_h, cam_w = self._camera_image.shape[:2]
             else:
                 cam_w, cam_h = CAM_WIDTH_DEFAULT, CAM_HEIGHT_DEFAULT
+            
+            # FIX: Check if detection is fresh before servoing
+            # If using stale tracker data, reduce motion to prevent spiraling
+            detection_age = 999.0
+            if self._last_detection_time:
+                detection_age = self._time.now() - self._last_detection_time
+            
+            if detection_age < 0.5:
+                # Fresh detection - full speed servoing
+                twist, is_close = self._servo.compute_control(bbox, cam_w, cam_h)
+                self._publish_twist(twist)
+            elif detection_age < 1.5:
+                # Slightly stale - reduce speed
+                twist, is_close = self._servo.compute_control(bbox, cam_w, cam_h)
+                twist.linear.x *= 0.3
+                twist.angular.z *= 0.3
+                self._publish_twist(twist)
+                self.get_logger().debug(f"Stale detection ({detection_age:.1f}s), reduced speed")
+            else:
+                # Very stale - stop motion
+                self._stop_motion()
+                is_close = False
                 
-            twist, is_close = self._servo.compute_control(bbox, cam_w, cam_h)
-            self._publish_twist(twist)
+                # If stale for too long, switch to SEARCHING to find the object
+                if detection_age > 3.0:
+                    self.get_logger().info(f"Detection lost for {detection_age:.1f}s -> SEARCHING")
+                    self._tracking_mode = False
+                    self._tracker.reset()
+                    self._start_searching()
+                    return
+                else:
+                    self.get_logger().info(f"Detection stale ({detection_age:.1f}s), waiting...")
             
             if is_close:
-                self.get_logger().info("Close enough (visual). Stopping.")
-                self._stop_motion()
-                self._tracking_mode = False
-                self._tracker.reset()
-                self._record_metrics(success=True)
-                self._state = FollowerState.STOPPED
+                # Only log and transition once (avoid spam)
+                if self._state == FollowerState.TRACKING:
+                    self.get_logger().info("Object close enough. MISSION SUCCESS! -> STOPPED")
+                    self._stop_motion()
+                    self._tracking_mode = False
+                    self._tracker.reset()
+                    self._record_metrics(success=True)
+                    self._state = FollowerState.STOPPED
                 
     # ==================== Helper Methods ====================
     
@@ -735,13 +815,38 @@ class ObjectFollowerModular(Node):
         tx = tf_msg.transform.translation.x
         ty = tf_msg.transform.translation.y
         q = tf_msg.transform.rotation
-        yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
+        camera_yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
         
-        # Goal in front of camera
-        goal_x = float(tx + FOLLOW_DISTANCE * math.cos(yaw))
-        goal_y = float(ty + FOLLOW_DISTANCE * math.sin(yaw))
+        # FIX: Calculate angular offset based on where object is in the frame
+        angle_offset = 0.0
+        if self._detector.current_detection and self._camera_image is not None:
+            det = self._detector.current_detection
+            cam_h, cam_w = self._camera_image.shape[:2]
+            left, top, right, bottom = self._detector.scale_to_camera(det, cam_w, cam_h)
+            
+            # Object center in pixels
+            obj_center_x = (left + right) / 2.0
+            image_center_x = cam_w / 2.0
+            
+            # Pixel offset normalized to [-1, 1]
+            normalized_offset = (obj_center_x - image_center_x) / (cam_w / 2.0)
+            
+            # Convert to angle (assuming ~62° horizontal FOV, so ±31° max)
+            CAMERA_HFOV_RAD = math.radians(62.0)
+            angle_offset = normalized_offset * (CAMERA_HFOV_RAD / 2.0)
+            
+            self.get_logger().debug(f"Object angular offset: {math.degrees(angle_offset):.1f}°")
         
-        self._nav2.send_goal(goal_x, goal_y, yaw)
+        # Apply offset to goal direction
+        goal_yaw = camera_yaw + angle_offset
+        
+        # Goal in direction of detected object
+        goal_x = float(tx + FOLLOW_DISTANCE * math.cos(goal_yaw))
+        goal_y = float(ty + FOLLOW_DISTANCE * math.sin(goal_yaw))
+        
+        self._nav2.send_goal(goal_x, goal_y, goal_yaw)
+        self._last_target_goal = (goal_x, goal_y, goal_yaw)
+        self._approach_goal_reached = False
         
     def _get_camera_transform(self):
         """Get camera to map transform."""

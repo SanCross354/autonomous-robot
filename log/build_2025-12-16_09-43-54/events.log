@@ -1,0 +1,9 @@
+[0.000000] (-) TimerEvent: {}
+[0.001786] (-) JobUnselected: {'identifier': 'articubot_TA'}
+[0.002144] (-) JobUnselected: {'identifier': 'explore_lite'}
+[0.002252] (-) JobUnselected: {'identifier': 'yolobot_recognition'}
+[0.002298] (-) JobUnselected: {'identifier': 'yolov8_msgs'}
+[0.002675] (object_follower) JobQueued: {'identifier': 'object_follower', 'dependencies': OrderedDict([('yolov8_msgs', '/home/sancross354/articubot_TA/src/install/yolov8_msgs')])}
+[0.002775] (object_follower) JobStarted: {'identifier': 'object_follower'}
+[0.019065] (object_follower) JobEnded: {'identifier': 'object_follower', 'rc': 1}
+[0.030465] (-) EventReactorShutdown: {}

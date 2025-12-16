@@ -22,6 +22,7 @@ OBJECT_LOST_TIMEOUT = 2.0        # Seconds before declaring object lost
 ROTATE_TIMEOUT = 6.0             # Seconds to rotate in SEARCHING phase
 SEARCH_FORWARD_TIME = 1.0        # Seconds to drive forward in SEARCHING
 SEARCH_MAX_DURATION = 18.0       # Max seconds in SEARCHING before returning to EXPLORING
+APPROACH_LOST_TIMEOUT = 8.0      # Seconds to continue approach after losing object (Motion Memory)
 TRACKING_LOST_TIMEOUT = 1.5      # Seconds until tracker considered lost
 
 # =============================================================================
@@ -42,8 +43,10 @@ MAX_ANG = 0.6                    # Max angular velocity for visual servoing
 # DETECTION & TRACKING THRESHOLDS (Based on KCF-YOLO paper)
 # =============================================================================
 # These define the "trigger zones" from the KCF-YOLO paper (Section 3.3)
-APPROACH_SWITCH_RATIO = 0.05     # Switch from EXPLORING to APPROACHING (Nav2)
-TRACKING_SWITCH_RATIO = 0.12    # Switch from APPROACHING to TRACKING (Visual)
+# FIX: Skip APPROACHING (Nav2). Go straight to TRACKING (Visual Servoing) when object visible.
+# Nav2 path planning causes the robot to turn away from the object.
+APPROACH_SWITCH_RATIO = 0.05     # (Unused now, kept for reference)
+TRACKING_SWITCH_RATIO = 0.05    # Switch directly to TRACKING when object detected
 DETECTION_STOP_THRESHOLD = 0.55  # bbox height ratio => stop (visual close)
 
 # Stable detection frames (for debouncing)
@@ -55,7 +58,7 @@ STABLE_DETECTION_FRAMES = 2
 # "When the target re-enters the field of view, YOLO can identify and continue
 # tracking the previously lost target by combining it with the KCF."
 YOLO_REINIT_INTERVAL = 5         # Re-init tracker every N frames to prevent drift
-TRACKER_TYPE = 'CENTROID'        # Options: 'CENTROID', 'CSRT', 'KCF', 'MOSSE'
+TRACKER_TYPE = 'CENTROID'        # CSRT not available, using CENTROID + freshness check
 TRACKING_HZ = 10.0               # Tracking loop frequency (Hz)
 
 # =============================================================================

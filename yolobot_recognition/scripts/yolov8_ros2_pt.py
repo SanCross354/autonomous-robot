@@ -51,13 +51,14 @@ class Camera_subscriber(Node):
             boxes = r.boxes
             for box in boxes:
                 self.inference_result = InferenceResult()
-                b = box.xyxy[0].to('cpu').detach().numpy().copy()  # get box coordinates in (top, left, bottom, right) format
+                b = box.xyxy[0].to('cpu').detach().numpy().copy()  # get box coordinates in (left, top, right, bottom) format
                 c = box.cls
                 self.inference_result.class_name = self.model.names[int(c)]
-                self.inference_result.top = int(b[0])
-                self.inference_result.left = int(b[1])
-                self.inference_result.bottom = int(b[2])
-                self.inference_result.right = int(b[3])
+                # FIX: xyxy = (x1, y1, x2, y2) = (left, top, right, bottom)
+                self.inference_result.left = int(b[0])
+                self.inference_result.top = int(b[1])
+                self.inference_result.right = int(b[2])
+                self.inference_result.bottom = int(b[3])
                 self.yolov8_inference.yolov8_inference.append(self.inference_result)
 
             #camera_subscriber.get_logger().info(f"{self.yolov8_inference}")
