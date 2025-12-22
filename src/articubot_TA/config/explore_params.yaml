@@ -1,0 +1,21 @@
+explore_lite:
+  ros__parameters:
+    planner_frequency: 1.0
+    visualize: true
+    progress_timeout: 30.0
+    potential_scale: 3.0
+    orientation_scale: 0.0
+    gain_scale: 1.0
+    transform_tolerance: 0.3
+    min_frontier_size: 0.5
+
+    # --- important for ROS2/Nav2 forks ---
+    global_frame: map
+    robot_base_frame: base_link
+
+    # Tell explore where to read the costmap:
+    costmap_topic: /global_costmap/costmap
+
+    # Tell explore which action/service to use (names in Nav2 Foxy):
+    planner_service: /planner_server/compute_path_to_pose
+    nav2_action: /navigate_to_pose

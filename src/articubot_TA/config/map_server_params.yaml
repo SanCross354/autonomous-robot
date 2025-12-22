@@ -1,0 +1,4 @@
+map_server:
+  ros__parameters:
+    yaml_filename: "/home/sancross354/articubot_TA/map_obstacle1_save.yaml"
+    use_sim_time: true

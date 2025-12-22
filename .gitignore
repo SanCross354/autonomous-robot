@@ -1,0 +1,30 @@
+# Build artifacts
+build/
+install/
+log/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# ROS 2 generated
+*.bag
+*.db3
+
+# Model weights (large files)
+*.pt
+*.onnx
+
+# Temporary files
+*.tmp
+*~
+
+# Metrics results (optional - uncomment if you want to track)
+# metrics_results.csv
