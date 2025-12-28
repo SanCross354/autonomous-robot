@@ -318,6 +318,30 @@ self._reached_time = self._time.now()  # Was time.time()
 
 ---
 
+### F. Hybrid Nav2 Handoff (Obstacle Avoidance)
+**Relevant Files:** 
+- `/home/sancross354/articubot_TA/src/object_follower/object_follower/object_follower_modular.py`
+
+**Problem:**
+When an obstacle blocks the direct path during visual servoing, the robot spammed "Path blocked. Stopping." indefinitely.
+
+**Solution:**
+Implemented **Hybrid Nav2 Handoff** that uses tracker memory to navigate around obstacles:
+
+```
+TRACKING (Visual Servo) → BLOCKED (Lidar) → APPROACHING (Nav2) → TRACKING (Re-acquire)
+```
+
+**Key Features:**
+1. **Tracker Memory Utilization** - Uses Centroid tracker's last known bbox to project Nav2 goal
+2. **Freshness Check** - Only handoff if tracker data < 1.5s old
+3. **Hysteresis Timer** - 3s cooldown before allowing mode switch back (prevents oscillation)
+4. **Path Clear Check** - Only re-acquire when path is clear AND object visible
+
+**Result:** Robot can now reach targets even when obstacles block the direct path, while keeping the target locked throughout the recovery process.
+
+---
+
 ## 7. Metrics Recording System
 **Relevant File:** `/home/sancross354/articubot_TA/src/object_follower/object_follower/object_follower_modular.py`
 

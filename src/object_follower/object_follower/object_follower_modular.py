@@ -194,6 +194,11 @@ class ObjectFollowerModular(Node):
         self._metrics_active = False  # True when recording metrics
         self._metrics_recorded = False  # Guard against duplicate recording
         
+        # Avoidance state (commit to avoidance for minimum duration to prevent oscillation)
+        self._avoidance_start_time: Optional[float] = None
+        self._avoidance_min_duration = 2.0  # Seconds to commit to avoidance
+        self._avoidance_direction = 0.0  # Rotation direction during avoidance
+        
         # ==================== Publishers ====================
         
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -698,11 +703,17 @@ class ObjectFollowerModular(Node):
                     self._publish_twist(centering_twist)
                     return
                     
-            # Lidar safety check
+            # Lidar safety check - back up + rotate toward clearer side
             if not self._is_path_clear():
-                self._publish_status("Path blocked. Stopping.")
-                self._nav2.cancel_current_goal()
-                self._stop_motion()
+                # Determine which side has more clearance
+                clearer_side = self._get_clearer_side()
+                rotation_dir = 0.4 if clearer_side == 'left' else -0.4  # Faster rotation
+                
+                # Combine reverse movement with rotation toward clearer side
+                avoidance_twist = Twist()
+                avoidance_twist.linear.x = -0.15  # Back up faster
+                avoidance_twist.angular.z = rotation_dir  # Rotate toward clearer side
+                self._publish_twist(avoidance_twist)
                 return
                 
             # Lidar stop condition
@@ -809,27 +820,64 @@ class ObjectFollowerModular(Node):
                 detection_age = self._time.now() - self._last_detection_time
             
             # Determine if we should servo
-            # Tracker is reliable OR fresh YOLO detection
+            # Fresh YOLO detection = full trust
+            # Tracker active but stale = limited trust (reduce angular to prevent spiraling)
             tracker_active = self._tracker.is_initialized
             fresh_detection = detection_age < 0.5
+            stale_but_usable = detection_age < 2.0 and tracker_active  # Trust tracker up to 2s
             
             # DEBUG: Log servo decision
             if self._tracking_tick % 20 == 1:
-                self.get_logger().info(f"📡 SERVO: tracker_active={tracker_active}, fresh={fresh_detection}, bbox={bbox is not None}")
+                self.get_logger().info(f"📡 SERVO: tracker_active={tracker_active}, fresh={fresh_detection}, age={detection_age:.1f}s")
             
-            if tracker_active or fresh_detection:
-                # Proceed with visual servoing
+            if fresh_detection:
+                # Fresh detection - full speed servoing
                 
-                # SAFETY STOP: Check Lidar Obstacles
+                current_time = self._time.now()
+                
+                # Check if we're in committed avoidance mode
+                in_avoidance = (
+                    self._avoidance_start_time is not None and
+                    (current_time - self._avoidance_start_time) < self._avoidance_min_duration
+                )
+                
+                # SAFETY CHECK: Lidar Obstacles (0.8m gives more room to maneuver)
                 try:
-                    if self._latest_laser and self._scanner.check_safety(self._latest_laser, min_dist=0.6):
-                        self._safety_stop_count += 1  # Metrics: count safety stops
-                        self.get_logger().warn(f"🛡️ Safety Stop #{self._safety_stop_count}: Obstacle < 0.6m!")
-                        self._stop_motion()
+                    obstacle_detected = self._latest_laser and self._scanner.check_safety(self._latest_laser, min_dist=0.8)
+                    
+                    if obstacle_detected or in_avoidance:
+                        self._safety_stop_count += 1
+                        
+                        # Start new avoidance maneuver OR continue existing one
+                        if self._avoidance_start_time is None:
+                            # NEW avoidance: determine direction and lock it
+                            clearer_side = self._get_clearer_side()
+                            self._avoidance_direction = 0.4 if clearer_side == 'left' else -0.4
+                            self._avoidance_start_time = current_time
+                            self.get_logger().warn(f"🛡️ Obstacle! Starting 2s avoidance: rotating {clearer_side}")
+                        
+                        # Log progress
+                        elapsed = current_time - self._avoidance_start_time
+                        if self._safety_stop_count % 40 == 1:
+                            remaining = max(0, self._avoidance_min_duration - elapsed)
+                            direction = "left" if self._avoidance_direction > 0 else "right"
+                            self.get_logger().info(f"🔄 Avoidance: {remaining:.1f}s remaining, rotating {direction}")
+                        
+                        # Execute committed avoidance maneuver
+                        avoidance_twist = Twist()
+                        avoidance_twist.linear.x = -0.15  # Back up
+                        avoidance_twist.angular.z = self._avoidance_direction  # Locked direction
+                        self._publish_twist(avoidance_twist)
+                        
+                        # Check if avoidance complete
+                        if not obstacle_detected and elapsed >= self._avoidance_min_duration:
+                            self.get_logger().info("✅ Avoidance complete! Path clear, resuming visual servo")
+                            self._avoidance_start_time = None
+                            self._avoidance_direction = 0.0
+                        
                         return
                 except Exception as e:
                     self.get_logger().error(f"CRITICAL: Safety Check Crashed! Error: {e}")
-                    # Continue anyway so the robot doesn't freeze
 
                 twist, is_close = self._servo.compute_control(bbox, cam_w, cam_h)
                 
@@ -838,13 +886,19 @@ class ObjectFollowerModular(Node):
                     self.get_logger().info(f"🚗 TWIST: lin={twist.linear.x:.3f}, ang={twist.angular.z:.3f}, close={is_close}")
                 
                 self._publish_twist(twist)
-            elif detection_age < 1.5:
-                # Slightly stale - reduce speed (fallback without tracker)
+                
+            elif stale_but_usable:
+                # Stale but tracker has recent memory - reduce ANGULAR to prevent spiraling
+                # Keep linear to continue approaching, but don't trust angular direction
                 twist, is_close = self._servo.compute_control(bbox, cam_w, cam_h)
-                twist.linear.x *= 0.3
-                twist.angular.z *= 0.3
+                twist.angular.z *= 0.2  # Reduce angular significantly to prevent spiraling
+                twist.linear.x *= 0.5   # Reduce linear slightly
+                
+                if self._tracking_tick % 20 == 2:
+                    self.get_logger().info(f"🚗 STALE TWIST: lin={twist.linear.x:.3f}, ang={twist.angular.z:.3f}")
+                
                 self._publish_twist(twist)
-                self.get_logger().debug(f"Stale detection ({detection_age:.1f}s), reduced speed")
+                self.get_logger().debug(f"Stale detection ({detection_age:.1f}s), reduced angular")
             else:
                 # Very stale - stop motion
                 self._stop_motion()
@@ -1017,6 +1071,47 @@ class ObjectFollowerModular(Node):
         except Exception:
             pass
         return False
+    
+    def _get_clearer_side(self) -> str:
+        """
+        Determine which side (left or right) has more clearance based on lidar.
+        
+        Returns:
+            'left' if left side is clearer, 'right' otherwise
+        """
+        if not self._latest_laser or not self._latest_laser.ranges:
+            return 'right'  # Default to right if no lidar
+            
+        ranges = self._latest_laser.ranges
+        n = len(ranges)
+        
+        # Split into left and right halves
+        # In ROS lidar, index 0 is typically behind, n/2 is front
+        # Left side: n/2 to 3n/4, Right side: n/4 to n/2
+        left_start = n // 2
+        left_end = 3 * n // 4
+        right_start = n // 4
+        right_end = n // 2
+        
+        # Calculate average distance on each side (filter invalid readings)
+        left_distances = []
+        right_distances = []
+        
+        for i in range(left_start, left_end):
+            r = ranges[i]
+            if r and not math.isinf(r) and not math.isnan(r) and r > 0.1:
+                left_distances.append(r)
+                
+        for i in range(right_start, right_end):
+            r = ranges[i]
+            if r and not math.isinf(r) and not math.isnan(r) and r > 0.1:
+                right_distances.append(r)
+        
+        # Calculate average clearance
+        left_avg = sum(left_distances) / len(left_distances) if left_distances else 0
+        right_avg = sum(right_distances) / len(right_distances) if right_distances else 0
+        
+        return 'left' if left_avg > right_avg else 'right'
         
     # ==================== Motion Control ====================
     

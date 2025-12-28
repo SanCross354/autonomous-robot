@@ -117,12 +117,12 @@ class VisualServoController:
         
         # Compute linear control (approach)
         lin = 0.0
-        path_clear = True
         
-        if self._is_path_clear_fn is not None:
-            path_clear = self._is_path_clear_fn()
-            
-        if self._state.ratio_ema < self._target_ratio and path_clear:
+        # NOTE: Path clear check removed from here. The tracking loop handles
+        # obstacle avoidance with proper backup+rotate behavior. Having it here
+        # caused the robot to stop without rotating (silent obstacle block).
+        
+        if self._state.ratio_ema < self._target_ratio:
             # Exponential approach for smooth deceleration
             beta = 6.0
             delta = max(0.0, self._target_ratio - self._state.ratio_ema)
