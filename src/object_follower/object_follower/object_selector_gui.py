@@ -14,7 +14,7 @@ class ObjectSelectorGUI(Node):
         self.objects = ['person', 'cup', 'bottle', 'chair', 'tv', 'cell phone', 'book']
 
         self.root = tk.Tk()
-        self.root.title("Select Object(s) to Follow")
+        self.root.title("Select Object(s) to Search")
 
         self.vars = {}
 
@@ -24,7 +24,7 @@ class ObjectSelectorGUI(Node):
             chk.pack(anchor='w')
             self.vars[obj] = var
 
-        start_button = tk.Button(self.root, text="Start Following", command=self.publish_selection)
+        start_button = tk.Button(self.root, text="Start Searching", command=self.publish_selection)
         start_button.pack(pady=10)
 
     def publish_selection(self):

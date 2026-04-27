@@ -199,6 +199,10 @@ class ObjectFollowerModular(Node):
         self._avoidance_min_duration = 2.0  # Seconds to commit to avoidance
         self._avoidance_direction = 0.0  # Rotation direction during avoidance
         
+        # Nav2 Bypass state (for when local avoidance fails after 3s)
+        self._bypass_mode = False
+        self._bypass_threshold = 3.0  # Seconds of blocking before triggering Nav2 bypass
+        
         # ==================== Publishers ====================
         
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -276,6 +280,11 @@ class ObjectFollowerModular(Node):
         self._return_home = self.get_parameter(
             'return_home_after_success'
         ).get_parameter_value().bool_value
+
+        self.declare_parameter('map_name', 'unknown')
+        self._map_name = self.get_parameter(
+            'map_name'
+        ).get_parameter_value().string_value
         
         self.get_logger().info("Object Follower (Modular) started - with all fixes applied")
         
@@ -457,6 +466,11 @@ class ObjectFollowerModular(Node):
         if ratio >= TRACKING_SWITCH_RATIO:
             if self._state in [FollowerState.SEARCHING, FollowerState.EXPLORING, 
                               FollowerState.APPROACHING]:
+                # DON'T switch to TRACKING if we're in bypass mode - let Nav2 complete first
+                if self._bypass_mode:
+                    self.get_logger().debug("Bypass in progress, ignoring TRACKING switch")
+                    return
+                    
                 self.get_logger().info(f"Object close (ratio={ratio:.3f}), switching to TRACKING")
                 self._nav2.cancel_current_goal()
                 self._exploration_locked = False
@@ -503,6 +517,7 @@ class ObjectFollowerModular(Node):
     
     def _on_waypoint_reached(self):
         """Called when Nav2 goal reached."""
+        
         if self._state == FollowerState.EXPLORING:
             self.get_logger().info("Waypoint reached, starting scan")
             self._exploration_locked = False
@@ -512,7 +527,21 @@ class ObjectFollowerModular(Node):
             val = "visible" if (self._last_detection_time and (self._time.now() - self._last_detection_time) < 2.0) else "NOT visible"
             self.get_logger().info(f"Approach goal reached! Target is {val}")
             self._approach_goal_reached = True
-            # Timer callback will decide next move
+            
+            # FIX: If we were in bypass mode, reset it and transition state immediately
+            if self._bypass_mode:
+                self.get_logger().info("✅ Nav2 Bypass complete!")
+                self._bypass_mode = False
+                
+                # If target visible, go to TRACKING; otherwise SEARCHING
+                if val == "visible":
+                    self.get_logger().info("Target visible! Switching to TRACKING")
+                    self._state = FollowerState.TRACKING
+                    self._tracking_mode = True
+                else:
+                    self.get_logger().info("Target not visible, starting search")
+                    self._state = FollowerState.SEARCHING
+                    self._start_searching()
             
     def _on_nav_aborted(self, distance: float):
         """Called when Nav2 goal aborted."""
@@ -658,10 +687,18 @@ class ObjectFollowerModular(Node):
             # Phase 2: Temporarily Lost -> Motion Memory
             elif time_since_detection < APPROACH_LOST_TIMEOUT:
                 if self._approach_goal_reached:
-                     # We reached the last known location but still don't see it -> SEARCH
-                    self.get_logger().info("Reached approach goal but target not seen -> SEARCHING")
-                    self._state = FollowerState.SEARCHING
-                    self._start_searching()
+                    if self._bypass_mode:
+                        # Bypass waypoint reached! Reset bypass mode and search for target
+                        self.get_logger().info("✅ Nav2 Bypass complete! Searching for target...")
+                        self._bypass_mode = False
+                        self._approach_goal_reached = False
+                        self._state = FollowerState.SEARCHING
+                        self._start_searching()
+                    else:
+                        # Normal approach goal reached but target not seen -> SEARCH
+                        self.get_logger().info("Reached approach goal but target not seen -> SEARCHING")
+                        self._state = FollowerState.SEARCHING
+                        self._start_searching()
                 elif not self._nav2.is_goal_active and self._last_target_goal:
                      # Lost, but we have a target -> Continue to it
                      self.get_logger().info(f"Object temp. lost ({time_since_detection:.1f}s), continuing to last goal")
@@ -863,13 +900,39 @@ class ObjectFollowerModular(Node):
                             direction = "left" if self._avoidance_direction > 0 else "right"
                             self.get_logger().info(f"🔄 Avoidance: {remaining:.1f}s remaining, rotating {direction}")
                         
-                        # Execute committed avoidance maneuver
+                        # NAV2 BYPASS: If still blocked after 3 seconds, trigger bypass
+                        if elapsed >= self._bypass_threshold and obstacle_detected and not self._bypass_mode:
+                            direction = "left" if self._avoidance_direction > 0 else "right"
+                            self.get_logger().warn(f"🚨 Still blocked after {elapsed:.1f}s! Starting Nav2 Bypass ({direction})")
+                            
+                            # Calculate bypass waypoint
+                            waypoint = self._calculate_bypass_waypoint(direction, distance=1.5)
+                            if waypoint:
+                                bypass_x, bypass_y, bypass_yaw = waypoint
+                                self.get_logger().info(f"📍 Bypass waypoint: ({bypass_x:.2f}, {bypass_y:.2f})")
+                                
+                                # Send Nav2 to bypass waypoint
+                                self._nav2.send_goal(bypass_x, bypass_y, bypass_yaw)
+                                
+                                # Switch to APPROACHING state with bypass mode
+                                self._bypass_mode = True
+                                self._state = FollowerState.APPROACHING
+                                self._tracking_mode = False
+                                
+                                # Reset avoidance state
+                                self._avoidance_start_time = None
+                                self._avoidance_direction = 0.0
+                                return
+                            else:
+                                self.get_logger().error("Failed to calculate bypass waypoint, continuing local avoidance")
+                        
+                        # Execute committed avoidance maneuver (back up + rotate)
                         avoidance_twist = Twist()
                         avoidance_twist.linear.x = -0.15  # Back up
                         avoidance_twist.angular.z = self._avoidance_direction  # Locked direction
                         self._publish_twist(avoidance_twist)
                         
-                        # Check if avoidance complete
+                        # Check if avoidance complete (path cleared during local avoidance)
                         if not obstacle_detected and elapsed >= self._avoidance_min_duration:
                             self.get_logger().info("✅ Avoidance complete! Path clear, resuming visual servo")
                             self._avoidance_start_time = None
@@ -1112,6 +1175,44 @@ class ObjectFollowerModular(Node):
         right_avg = sum(right_distances) / len(right_distances) if right_distances else 0
         
         return 'left' if left_avg > right_avg else 'right'
+    
+    def _calculate_bypass_waypoint(self, direction: str, distance: float = 1.5):
+        """
+        Calculate a bypass waypoint offset perpendicular to robot's current heading.
+        
+        Args:
+            direction: 'left' or 'right'
+            distance: How far to the side (meters)
+            
+        Returns:
+            (x, y, yaw) or None if TF unavailable
+        """
+        try:
+            # Get robot's current position in map frame
+            tf_msg = self._tf_buffer.lookup_transform('map', 'base_link', Time())
+            
+            robot_x = tf_msg.transform.translation.x
+            robot_y = tf_msg.transform.translation.y
+            q = tf_msg.transform.rotation
+            robot_yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
+            
+            # Calculate perpendicular offset
+            # Left is +90 degrees, Right is -90 degrees from heading
+            if direction == 'left':
+                offset_angle = robot_yaw + math.pi / 2
+            else:
+                offset_angle = robot_yaw - math.pi / 2
+            
+            # Calculate bypass waypoint
+            bypass_x = robot_x + distance * math.cos(offset_angle)
+            bypass_y = robot_y + distance * math.sin(offset_angle)
+            
+            # Keep original heading (facing forward)
+            return (bypass_x, bypass_y, robot_yaw)
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to calculate bypass waypoint: {e}")
+            return None
         
     # ==================== Motion Control ====================
     
@@ -1244,7 +1345,7 @@ class ObjectFollowerModular(Node):
                 with open(METRICS_CSV, 'w', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([
-                        "trial_id", "target_class", "search_mode",
+                        "trial_id", "map_name", "target_class", "search_mode",
                         "selection_time", "detection_time", "reach_time",
                         "time_to_find_s", "time_to_reach_s", "total_time_s",
                         "path_length_m", "safety_stops",
@@ -1294,6 +1395,7 @@ class ObjectFollowerModular(Node):
                 writer = csv.writer(f)
                 writer.writerow([
                     self._selection_counter,
+                    self._map_name,
                     self._detector.selected_class,
                     search_mode,
                     f"{self._selection_start_time:.3f}" if self._selection_start_time else "",
@@ -1315,7 +1417,7 @@ class ObjectFollowerModular(Node):
             self.get_logger().info("=" * 50)
             self.get_logger().info("📊 METRICS SUMMARY")
             self.get_logger().info("=" * 50)
-            self.get_logger().info(f"Trial #{self._selection_counter} | Target: {self._detector.selected_class} | Mode: {search_mode}")
+            self.get_logger().info(f"Trial #{self._selection_counter} | Map: {self._map_name} | Target: {self._detector.selected_class} | Mode: {search_mode}")
             self.get_logger().info("-" * 50)
             self.get_logger().info(f"⏱️  Time to Find:    {time_to_find:.2f}s" if time_to_find else "⏱️  Time to Find:    N/A")
             self.get_logger().info(f"🏁 Time to Reach:   {time_to_reach:.2f}s" if time_to_reach else "🏁 Time to Reach:   N/A")

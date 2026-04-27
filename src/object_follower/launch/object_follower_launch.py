@@ -5,6 +5,14 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
+    map_name = LaunchConfiguration('map_name', default='unknown')
+
+    declare_map_name_cmd = DeclareLaunchArgument(
+        'map_name',
+        default_value='unknown',
+        description='Name of the map being used (e.g. map_fix1 or map_fix2)'
+    )
+
     # Declare arguments
     # use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     # use_random_search = LaunchConfiguration('use_random_search', default='true')
@@ -22,6 +30,7 @@ def generate_launch_description():
     # )
 
     return LaunchDescription([
+        declare_map_name_cmd,
         # declare_sim_time_cmd,
         # declare_random_search_cmd,
 
@@ -74,7 +83,7 @@ def generate_launch_description():
             executable='object_follower_modular',
             name='object_follower',
             output='screen',
-            parameters=[{'target_class': 'person'}]
+            parameters=[{'target_class': 'person', 'map_name': map_name}]
         ),
         
         # ---------------------------------------------------------

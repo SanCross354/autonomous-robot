@@ -27,10 +27,10 @@ class ObjectSelectorGUI(QWidget):
     def __init__(self, ros_node):
         super().__init__()
         self.ros_node = ros_node
-        self.setWindowTitle('Object Selector GUI')
+        self.setWindowTitle('Object Search GUI')
         self.setGeometry(300, 300, 300, 400)
 
-        self.label = QLabel('Select an object to follow:')
+        self.label = QLabel('Select an object to search:')
         self.label.setAlignment(Qt.AlignCenter)
 
         self.object_list = QListWidget()
@@ -39,10 +39,10 @@ class ObjectSelectorGUI(QWidget):
         ])
         self.object_list.setSelectionMode(QListWidget.SingleSelection)
 
-        self.select_button = QPushButton('Start Following')
+        self.select_button = QPushButton('Start Searching')
         self.select_button.clicked.connect(self.on_select)
 
-        self.stop_button = QPushButton('Stop Following')
+        self.stop_button = QPushButton('Stop Searching')
         self.stop_button.clicked.connect(self.on_stop)
 
         # Layouts
@@ -68,7 +68,7 @@ class ObjectSelectorGUI(QWidget):
 
     def on_stop(self):
         self.ros_node.publish_selection('')  # Send empty string
-        QMessageBox.information(self, 'Stopped', 'Robot will stop following.')
+        QMessageBox.information(self, 'Stopped', 'Robot will stop searching.')
 
 def launch_gui():
     rclpy.init()

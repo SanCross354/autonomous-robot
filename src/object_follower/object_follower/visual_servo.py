@@ -111,6 +111,14 @@ class VisualServoController:
         # Check if close enough (stop condition)
         is_close_enough = self._state.ratio_ema >= DETECTION_STOP_THRESHOLD
         
+        # DEBUG: Log ratio_ema and close status periodically
+        if hasattr(self, '_debug_counter'):
+            self._debug_counter += 1
+        else:
+            self._debug_counter = 0
+        if self._debug_counter % 50 == 1:
+            self._logger.info(f"📏 SERVO DEBUG: ratio_ema={self._state.ratio_ema:.3f}, threshold={DETECTION_STOP_THRESHOLD}, is_close={is_close_enough}")
+        
         # Compute angular control (centering)
         ang = -Kp_ang * self._state.cx_ema
         ang = max(-MAX_ANG, min(MAX_ANG, ang))
