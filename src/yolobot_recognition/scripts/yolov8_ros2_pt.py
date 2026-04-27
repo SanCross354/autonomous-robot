@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 from ultralytics import YOLO
 import rclpy
 from rclpy.node import Node
@@ -17,7 +18,9 @@ class Camera_subscriber(Node):
     def __init__(self):
         super().__init__('camera_subscriber')
 
-        self.model = YOLO('~/articubot_TA/src/yolobot_recognition/scripts/yolov8n.pt')
+        _script_dir = os.path.dirname(os.path.realpath(__file__))
+        _model_path = os.path.join(_script_dir, 'yolo11n.pt')
+        self.model = YOLO(_model_path)
 
         self.yolov8_inference = Yolov8Inference()
 
